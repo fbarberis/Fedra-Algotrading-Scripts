@@ -1,0 +1,379 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © fbarberis
+// User Version
+
+//@version=5
+indicator('[Fedra Algotrading LR + TTP Indicator Lite]', '[Fedra Algotrading LR + TTP Indicator Lite] 3.5', overlay = true, format=format.price, precision=2, max_labels_count=500)
+
+///////////////SESSION
+InSession(sessionTimes, sessionTimeZone=syminfo.timezone) =>
+    not na(time(timeframe.period, sessionTimes, sessionTimeZone))
+
+
+// Create the inputs
+sessionInput = input.session("0000-0000", title="Session Times", 
+     group="Trading Session", tooltip="Use the checkboxes to select " + 
+     "on which days of the week this session is active. The session " +
+     "has to be active on at least one day.")
+monSession = input.bool(true, title="Mon ", group="Trading Session", inline="d1")
+tueSession = input.bool(true, title="Tue ", group="Trading Session", inline="d1")
+wedSession = input.bool(true, title="Wed ", group="Trading Session", inline="d1")
+thuSession = input.bool(true, title="Thu ", group="Trading Session", inline="d1")
+friSession = input.bool(true, title="Fri   ", group="Trading Session", inline="d2")
+satSession = input.bool(true, title="Sat  ", group="Trading Session", inline="d2")
+sunSession = input.bool(true, title="Sun ", group="Trading Session", inline="d2")
+
+BGSession = input.bool(false, title="Session Background?", group="Trading Session")
+// Make a days of week string based on the value of the checkboxes
+sessionDays = ""
+
+if sunSession
+    sessionDays += "1"
+if monSession
+    sessionDays += "2"
+if tueSession
+    sessionDays += "3"
+if wedSession
+    sessionDays += "4"
+if thuSession
+    sessionDays += "5"
+if friSession
+    sessionDays += "6"
+if satSession
+    sessionDays += "7"
+
+// Make the session string by joining the time with the days
+tradingSession = sessionInput + ":" + sessionDays
+bgcolor(InSession(tradingSession) and BGSession ? color.new(color.fuchsia, 85) : na)
+
+// Highlight background when bars happen inside session specified
+///////////////////////////
+source = input.source(open, group='LR Settings (BUY & SELL)')
+length = input.int(title='Lenght', defval= 10, step = 10, minval=1, group='LR Settings (BUY & SELL)', tooltip="Number of candles used to calculate the Linear Regression. Recommended values are between 10 and 100.")
+offset = 0//input.int(0, minval=0, group='LR Settings (BUY & SELL)')
+
+dev = input.float(title='Deviation: -3/0/3', defval= 2.0, step = 0.5, group='LR Settings (BUY & SELL)', tooltip="Linear regression deviation to establish the range. Recommended values are between 0 and 3.")
+smoothing = 1//input.int(1, minval=1, group='LR Settings (BUY & SELL)')
+mtf_val = input.timeframe('', 'Resolution', group='LR Settings (BUY & SELL)')
+line_thick = 1//input.int(1, 'S&R Thickness', minval=1, maxval=4, group='LR Settings')
+p = 'Lime'//input.string('Lime', 'Up Color', options=['Red', 'Lime', 'Orange', 'Teal', 'Yellow', 'White', 'Black'], group='LR Settings')
+q = 'Red'//input.string('Red', 'Down Color', options=['Red', 'Lime', 'Orange', 'Teal', 'Yellow', 'White', 'Black'], group='LR Settings')
+goto = 0//input.int(0, 'End At Bar Index', group='LR Settings')
+
+var totalPnl = 0.0
+var pnlPos = 0
+var pnlNeg = 0
+var totalTrades = 0
+var hold = 0.0
+byh = (((close-hold)/hold)*100)
+var start = timestamp(year, month, dayofweek, hour, minute, second)
+enableEma200 = input.bool(title='Enable confirmation MA Filter?', defval=false, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Add an MA for trend confirmation")
+bigTrend_lenght = input.int(title= "Lenght of the confirmation MA Filter", defval= 200, step = 10, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Longs only when green")
+MAsource = input.source(open, title= "MAs Source", group='MA Settings to determine downtrend (BUY & SELL)')
+
+emaLength = input.int(title='Fast MA Length', defval=20, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Yellow line: Suggested optimization values, between 10 and 50")
+
+showSTfilter = input.bool(title='Apply Supertrend Filter?', defval=false, group='SuperTrend Settings (BUY)', tooltip="Add super trend confirmation to the trend filter")
+
+
+//showTSL = input.bool(title='Enable SL?', defval=true, group='Fine Tunning Settings (SELL)', tooltip="This option enables the stop loss (red line).")
+//enableSL = input.bool(title='Enable "Exit in Loss"?', defval=true, group='Fine Tunning Settings (SELL)', tooltip="This option enables selling at a loss when it determines that the trade is unlikely to be favorable: the price is below 'Exit in loss' (fuchsia line) and breaks upwards the deviation of the linear regression (orange triangle).")
+//enableBE = input.bool(title='Enable Break Even?', defval=false, group='Fine Tunning Settings (SELL)', tooltip="This option enables a take profit on break even when the price is between the fast MA (yellow line) and the slow MA (blue line) and the default percentage of 1.5% is reached.")
+//showSLEMAfilter = input.bool(title='Apply Trend Filter to "Exit in Loss"?', defval=true, group='Fine Tunning Settings (SELL)', tooltip="With this condition enabled, the Fast MA (yellow line) must be above the Slow MA (blue line), for 'Sell in loss' to be allowed.")
+
+
+string i_maType = input.string("SMA", "Fast MA type", options = ["SMA","EMA", "RMA", "WMA","HMA", "CHANGE","CMO","COG","DEV","HIGHEST","LOWEST","MEDIAN","MOM","RANGE","STDEV","VARIANCE"], group='MA Settings to determine downtrend (BUY & SELL)')
+
+float ma = switch i_maType
+	"SMA" => ta.sma(MAsource, emaLength)
+	"EMA" => ta.ema(MAsource, emaLength)
+	"RMA" => ta.rma(MAsource, emaLength)
+	"HMA" => ta.hma(MAsource, emaLength)
+	"CHANGE" => ta.change(MAsource, emaLength)
+	"CMO" => ta.cmo(MAsource, emaLength)
+	"COG" => ta.cog(MAsource, emaLength)
+	"DEV" => ta.dev(MAsource, emaLength)
+	"HIGHEST" => ta.highest(MAsource, emaLength)
+	"LOWEST" => ta.lowest(MAsource, emaLength)
+	"MEDIAN" => ta.median(MAsource, emaLength)
+	"MOM" => ta.mom(MAsource, emaLength)
+    "RANGE" => ta.range(MAsource, emaLength)
+    "STDEV" => ta.stdev(MAsource, emaLength)
+    "VARIANCE" => ta.variance(MAsource, emaLength)
+	// Default used when the three first cases do not match.
+	=> ta.wma(MAsource, emaLength)
+
+emaLength2 = input.int(title='Slow MA Length', defval=100, step=10, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Blue line: Suggested optimization values, between 50 and 200")
+string i_maType2 = input.string("SMA", "Slow MA type", options = ["SMA","EMA","RMA", "WMA","HMA", "CHANGE", "CMO","COG","DEV","HIGHEST","LOWEST","MEDIAN", "MOM","RANGE","STDEV","VARIANCE"], group='MA Settings to determine downtrend (BUY & SELL)')
+
+float ma2 = switch i_maType2
+	"SMA" => ta.sma(MAsource, emaLength2)
+	"EMA" => ta.ema(MAsource, emaLength2)
+	"RMA" => ta.rma(MAsource, emaLength2)
+	"HMA" => ta.hma(MAsource, emaLength2)
+	"CHANGE" => ta.change(MAsource, emaLength2)
+	"CMO" => ta.cmo(MAsource, emaLength2)
+	"COG" => ta.cog(MAsource, emaLength2)
+	"DEV" => ta.dev(MAsource, emaLength2)
+	"HIGHEST" => ta.highest(MAsource, emaLength2)
+	"LOWEST" => ta.lowest(MAsource, emaLength2)
+	"MEDIAN" => ta.median(MAsource, emaLength2)
+	"MOM" => ta.mom(MAsource, emaLength2)
+	"RANGE" => ta.range(MAsource, emaLength2)
+	"STDEV" => ta.stdev(MAsource, emaLength2)
+	"VARIANCE" => ta.variance(MAsource, emaLength2)
+	// Default used when the three first cases do not match.
+	=> ta.wma(MAsource, emaLength2)
+
+ema200 = ta.sma(open, bigTrend_lenght)
+linecolor = (open > ema200)  ? color.new(color.green, 50) : (open < ema200) ? color.new(color.red, 50) : na	
+line200 = plot(enableEma200 ? ema200 : na, linewidth=4, title= "SMA 200", color=linecolor)
+
+//showLRplot = input.bool(title='Show LR line', defval=false, group='Appearance')
+showMA = input.bool(title='Show SMA', defval=true, group='Appearance')
+
+showBGcolor = true//input.bool(title='Show BG Color', defval=true, group='Appearance')
+showBGcolorSL = true//input.bool(title='Show SL Active Color', defval=true, group='Appearance')
+
+EMAfilter = ma > ma2 
+
+redBars = 1//input.int(title='Bars in Downtrend to sell', defval=1, minval= 0, group='Fine Tunning Settings (SELL)')
+d = ta.barssince(ta.crossunder(ma, ma2))
+if ta.crossover(ma,ma2)
+    d:=0
+
+downStreak = redBars == d
+EMAbuy = ta.crossover(ma,ma2)
+line1 = plot(showMA ? ma : na, linewidth=2, color=color.new(color.yellow, 0))
+line2 = plot(showMA ? ma2 : na, linewidth=2, color=color.new(color.blue, 0))
+fill(line1, line2, color = ma > ma2 ? color.green : color.red, transp=85)
+//Opcional//plotshape(buy2, title= "Buy2", location=location.abovebar, color=color.blue, transp=0, style=shape.labelup)
+
+
+price = input.source(close, title= "Price source.", group='Fine Tunning Settings (SELL)')
+uptrend = price > ma
+downtrend = price < ma
+
+
+////////LR
+cc(x) =>
+    x == 'Red' ? color.red : x == 'Lime' ? color.lime : x == 'Orange' ? color.orange : x == 'Teal' ? color.teal : x == 'Yellow' ? color.yellow : x == 'Black' ? color.black : color.white
+data(x) =>
+    ta.sma(request.security(syminfo.tickerid, mtf_val != '' ? mtf_val : timeframe.period, x), smoothing)
+
+
+linreg = data(ta.linreg(source, length, offset))
+linreg_p = data(ta.linreg(source, length, offset + 1))
+//plot(linreg, "Regression Line", cc(linreg>linreg[1]?p:q), editable=false)
+
+x = bar_index
+slope = linreg - linreg_p
+intercept = linreg - x * slope
+deviationSum = 0.0
+for i = 0 to length - 1 by 1
+    deviationSum := deviationSum + math.pow(source[i] - (slope * (x - i) + intercept), 2)
+    deviationSum
+deviation = math.sqrt(deviationSum / length)
+x1 = x - length
+x2 = x
+y1 = slope * (x - length) + intercept
+y2 = linreg
+
+updating = goto <= 0 or x < goto
+
+if updating
+    line b = line.new(x1, y1, x2, y2, xloc.bar_index, extend.right, color.aqua, width=line_thick)
+    line.delete(b[1])
+    line dp = line.new(x1, deviation * dev + y1, x2, deviation * dev + y2, xloc.bar_index, extend.right, cc(q), width=line_thick)
+    line.delete(dp[1])
+    line dm = line.new(x1, -deviation * dev + y1, x2, -deviation * dev + y2, xloc.bar_index, extend.right, cc(p), width=line_thick)
+    line.delete(dm[1])
+
+dm_current = -deviation * dev + y2
+dp_current = deviation * dev + y2
+
+sellup = ta.crossover(price, dp_current)
+
+
+/////////////Trailing Take Profit
+
+//////////////////////////////SUPERTREND
+Periods = input.int(title="ATR Period", defval=10, group='SuperTrend Settings (BUY)')
+src2 = input(hl2, title="Source", group='SuperTrend Settings (BUY)')
+Multiplier = input.float(title="ATR Multiplier", step=0.1, defval=3.0, group='SuperTrend Settings (BUY)')
+changeATR= false//input.bool(title="Change ATR Calculation Method ?", defval=false, group='SuperTrend Settings (BUY)')
+//showsignals = input.bool(title="Show Buy/Sell Signals ?", defval=true)
+//highlighting = input.bool(title="Highlighter On/Off ?", defval=true, group='SuperTrend Settings')
+atr2 = ta.sma(ta.tr, Periods)
+atr= changeATR ? ta.atr(Periods) : atr2
+up=src2-(Multiplier*atr)
+up1 = nz(up[1],up)
+up := close[1] > up1 ? math.max(up,up1) : up
+dn=src2+(Multiplier*atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+//showST = input.bool(title='Show Super Trend', defval=false, group='Appearance')
+upPlot = plot(showSTfilter and trend == 1 ? up : na, title="Up Trend", style=plot.style_linebr, linewidth=1, color=color.aqua)
+buySignal = trend == 1 and trend[1] == -1
+//plotshape(buySignal ? up : na, title="UpTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.green, transp=0)
+//plotshape(buySignal and showsignals ? up : na, title="Buy", text="Buy", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.green, textcolor=color.white, transp=0)
+dnPlot = plot(showSTfilter and trend != 1 ? dn : na, title="Down Trend", style=plot.style_linebr, linewidth=1, color=color.maroon)
+sellSignal = trend == -1 and trend[1] == 1
+//plotshape(sellSignal ? dn : na, title="DownTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.red, transp=0)
+//plotshape(sellSignal and showsignals ? dn : na, title="Sell", text="Sell", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.red, textcolor=color.white, transp=0)
+isup = trend == 1 ? up : na
+isdn = trend == 1 ? dn : na
+//////////////////////////////
+mapositive = ma-ma2 > ma[1]-ma2[1]
+//////////////////////////////
+
+
+
+
+//////////
+buy = ((EMAfilter == false and ta.crossunder(price, dm_current) and isup) and mapositive) 
+buy2 = open > ma2 and ma < ma2
+
+if enableEma200
+    if showSTfilter == true
+        buy := ta.crossunder(price, dm_current) and isup  and mapositive and close > ema200
+    else
+        buy := ta.crossunder(price, dm_current)  and mapositive and close > ema200
+else
+    if showSTfilter == true
+        buy := ta.crossunder(price, dm_current) and isup  and mapositive
+    else
+        buy := ta.crossunder(price, dm_current)  and mapositive
+        
+var S_sell = false
+var S_buy = false
+
+buyalert = not S_sell and buy and EMAfilter and mapositive
+entry_price = ta.valuewhen(buyalert, close, 0)
+
+takePer = input.float(3.0, title='Take Profit %', group='Fine Tunning Settings (SELL)', tooltip="Green line") / 100
+breakEven = input.float(1.5, title='Break Even % (<TP)', step= 0.1, group='Fine Tunning Settings (SELL)', tooltip="Put any value > to TP to disable it") / 100
+longTake = entry_price * (1 + takePer)
+longBreakeven = entry_price * (1 + breakEven)
+TraditionalPer = input.float(3.0, title='Stop Loss %', group='Fine Tunning Settings (SELL)', tooltip="Red line") / 100
+sl = entry_price * (1 - TraditionalPer)
+
+
+
+trailpoints = 0.00001 //input.float(title='Trail Points', defval=0.01, minval=0.0, maxval=2.0, step=0.01, group='Fine Tunning Settings (SELL)')
+//trailoffset = input.float(title='Trail Offset (0.01 = 1%)', defval=0.010, minval=0.0, maxval=2.0, step=0.005, group='Fine Tunning Settings (SELL)', tooltip = "Percentage for the trailing stop loss that is triggered once the TP is reached. Expressed in float for ease of calculation (0.01 = 1%).")
+trailloss = 0.01 //input.float(title='Trail loss', defval=0.01, minval=0.0, maxval=2.0, step=0.01, group='Fine Tunning Settings (SELL)')
+
+
+if showSTfilter == true
+    buyalert := not S_sell and buy and EMAfilter and isup  and mapositive and InSession(tradingSession)
+else
+    buyalert := not S_sell and buy and EMAfilter  and mapositive and InSession(tradingSession)
+
+//enterLong = input(title = 'Enter Long Command', defval="", group='Optional bot Command Settings {{strategy.order.comment}}', tooltip="Enter here the command provided by your preferred bot platform to enter long.")
+//exitLong = input(title= 'Exit Long Command', defval="", group='Optional bot Command Settings {{strategy.order.comment}}', tooltip="Enter here the command provided by your preferred bot platform to exit long.")
+plotshape(buy, title='buy', location=location.belowbar, color=color.new(color.yellow, 0), style=shape.triangleup)
+//plotshape(sellup, title='sellup', location=location.abovebar, color=color.new(color.orange, 0), style=shape.triangledown)
+var tradecloseprice = 0.0
+
+if close > 0 and not S_buy
+    tplabel = label.new(x=bar_index[0], y=high[0]+high[0]*0.02, color=color.gray, textcolor=color.white, style=label.style_label_down, text='Unr.PnL: ' + str.tostring(((close-tradecloseprice)/tradecloseprice)*100)+'%')
+    //pnl = (((close-tradecloseprice)/tradecloseprice)*100)
+    //totalPnl := totalPnl + pnl
+    tplabel 
+    label.delete(tplabel[1])
+    
+if buyalert
+    buylabel = label.new(x=bar_index, y=low[0] - low[0]*0.02, color=color.blue, textcolor=color.white, style=label.style_label_up, text='BUY :' + str.tostring(close))
+    buylabel
+    if totalPnl == 0.0
+        hold := close
+        //start := timestamp(timezone, year, month, day, hour, minute, second)
+    //(((close-tradecloseprice)/tradecloseprice)*100)
+    //entry_price := 
+    longTake := entry_price * (1 + takePer)
+    longBreakeven = entry_price * (1 + breakEven)
+    tradecloseprice := close 
+    S_sell := true
+    S_buy := false
+
+
+sellTPalert = not S_buy and price >= longTake
+if sellTPalert
+    tplabel = label.new(x=bar_index[0], y=high[0] + high[0] * 0.02, color=color.green, textcolor=color.white, style=label.style_label_down, text='TP P/L: ' + str.tostring(((close-tradecloseprice)/tradecloseprice)*100)+'%')
+    pnl = (((close-tradecloseprice)/tradecloseprice)*100)
+    totalPnl := totalPnl + pnl
+    tplabel 
+    S_sell := false
+    S_buy := true
+    pnlPos := pnlPos + 1
+    totalTrades := totalTrades +1
+    
+        
+sellBEalert = not S_buy and price >= longBreakeven and downtrend
+if sellBEalert
+    belabel = label.new(x=bar_index, y=high[0] + high[0] * 0.02, color=color.orange, textcolor=color.white, style=label.style_label_down, text='BE P/L: ' + str.tostring(((close-tradecloseprice)/tradecloseprice)*100)+'%')
+    pnl = (((close-tradecloseprice)/tradecloseprice)*100)
+    
+    totalPnl := totalPnl + pnl
+    belabel
+    S_sell := false
+    S_buy := true
+    pnlPos := pnlPos + 1
+    totalTrades := totalTrades +1
+    
+sellSLalert = not S_buy and price <= sl 
+if sellSLalert
+    sllabel = label.new(x=bar_index, y=low[0] - low[0]*0.02, color=color.red, textcolor=color.white, style=label.style_label_up, text='SL P/L: ' + str.tostring(((close-tradecloseprice)/tradecloseprice)*100)+'%')
+    pnl = (((close-tradecloseprice)/tradecloseprice)*100)
+    
+    totalPnl := totalPnl + pnl
+    sllabel
+    S_sell := false
+    S_buy := true
+    pnlNeg := pnlNeg + 1
+    totalTrades := totalTrades +1
+    
+winratio = pnlPos/pnlNeg
+        
+var pnlTable = table.new(position = position.top_right, columns = 4, rows = 4, border_color = color.white, border_width = 1)
+
+table.cell(table_id = pnlTable, column = 0, row = 0, bgcolor = color.gray, text_color = color.white, text = "Closed Trades")
+table.cell(table_id = pnlTable, column = 1, row = 0, bgcolor = color.gray, text_color = color.white, text = "Profit Factor")
+table.cell(table_id = pnlTable, column = 2, row = 0, bgcolor = color.gray, text_color = color.white, text = "Cumulative PnL")
+table.cell(table_id = pnlTable, column = 3, row = 0, bgcolor = color.gray,  text_color = color.white, text = "Buy & Hold")
+table.cell(table_id = pnlTable, column = 0, row = 1, bgcolor = color.gray, text_color = color.white, text = str.tostring(totalTrades))
+table.cell(table_id = pnlTable, column = 1, row = 1, bgcolor = color.gray, text_color = color.yellow, text = str.tostring(winratio))
+table.cell(table_id = pnlTable, column = 2, row = 1, bgcolor = color.gray, text_color = color.white,text = str.tostring(totalPnl)+'%')
+table.cell(table_id = pnlTable, column = 3, row = 1, bgcolor = color.gray, text_color = color.yellow, text = str.tostring(byh)+'%')
+if totalPnl > 0
+    table.cell_set_bgcolor(pnlTable, column = 2, row = 1, bgcolor = color.green) 
+else
+    table.cell_set_bgcolor(pnlTable, column = 2, row = 1, bgcolor = color.red) 
+if winratio > 1
+    table.cell_set_bgcolor(pnlTable, column = 1, row = 1, bgcolor = color.green) 
+else
+    table.cell_set_bgcolor(pnlTable, column = 1, row = 1, bgcolor = color.red) 
+    table.cell(table_id = pnlTable, column = 0, row = 2, bgcolor = color.blue, text_color = color.white, text =  'Fedra Algotrading Scripts')
+table.merge_cells(pnlTable, 0, 2, 3, 2)
+//table.cell(table_id = pnlTable, column = 0, row = 3, bgcolor = color.green, text_color = color.white, text =  'Support me in https://www.patreon.com/fedra_strategy')
+//table.merge_cells(pnlTable, 0, 3, 3, 3)
+
+//if byh > close
+//    table.cell_set_bgcolor(pnlTable, column = 2, row = 1, bgcolor = color.green) 
+//else
+//    table.cell_set_bgcolor(pnlTable, column = 2, row = 1, bgcolor = color.red)
+    
+//debuglabel = label.new(x=bar_index, y=low[0] - low[0]*0.02, color=color.red, textcolor=color.white, style=label.style_label_up, text='Win Ratio ' + str.tostring(winratio)+'%')
+//label.delete(debuglabel[1])
+alertcondition(buyalert, title='BUY Alert')
+alertcondition(sellTPalert or sellBEalert, title='SELL Alert TP')
+alertcondition(sellBEalert or sellBEalert, title='SELL Alert BE')
+alertcondition(sellSLalert or sellBEalert, title='SELL Alert SL')
+
+plot(S_sell ? longTake : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='Long Take Profit')
+plot(S_sell ? sl : na, style=plot.style_linebr, color=color.new(color.maroon, 0), linewidth=1, title='Long Take Profit')
+disclaimer = input.bool (defval = false, title = '🔥🔥This indicator is a simplified version of my automatic trading strategy for bots "Fedra Algotrading Strategy". In order to function as an indicator, several sacrifices had to be made: - No backtesting to optimize the parameters. -Cannot use the current price on each tick, so the calculations are made at the closing value of each candle and trailing take profit isnt possible. -Automation for automatic trading is limited. -It is not possible to take advantage of advanced risk management and capital management functions. If you are interested in more advanced versions, please check my other scripts..🔥🔥', tooltip = "Check out the advanced script 'Fedra Algotrading Strategy'")

@@ -1,0 +1,660 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © fbarberis
+// User Version
+
+
+//@version=5
+strategy('[Fedra Algotrading Strategy Premium]', '[FASPremium] 2.6', calc_on_every_tick=true, overlay=true, process_orders_on_close=true, default_qty_type=strategy.cash, default_qty_value=1000, initial_capital=1000, precision=4, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.1, max_bars_back=4000)
+
+// Define a boolean input variable to display a disclaimer message in the strategy's settings and tooltips
+disclaimer = input.bool (defval = false, title = '🔥🔥This strategy is designed to work on 30 or lower minute charts. It uses real-time price information calculated on each tick to close trades. If you want the behavior of the live script to be identical to the backtest, you must uncheck the "calculate on every tick" option in the strategy properties. There you can also adjust your exchange commission, the default is 1%. Read the tooltips (!) to understand the function of each parameter.🔥🔥', tooltip = "Remember when backtesting  that past performance is no guarantee of future results")
+
+// Define two time input variables to set the backtesting start and end dates
+i_startTime = input.time(defval=timestamp('01 Jan 2016 00:00 +0000'), title='Start Time', group='Backtest')
+i_endTime = input.time(defval=timestamp('30 Sep 2030 00:30 +0000'), title='End Time', group='Backtest')
+
+// Define a boolean input variable to enable backtesting only for the last specified number of days
+lastdays = input.bool (defval = false, title = 'Backtest only last days', group = 'Backtest')
+
+// Define an integer input variable to set the number of days to backtest
+btDays = input.int(defval = 180, step=30, title = 'How many days?', group = 'Backtest', tooltip="Limits the backtest to the last selected days.")
+
+// Define a boolean input variable to enable or disable the debug mode
+debugmode = input.bool(defval = true, title = 'Debug mode', group = 'Backtest', tooltip="The debug mode allows you to counteract the limitations of tradingview backtesting. It will display a green visual signal when the strategy would have taken profit and a red one when it would have been stop loss in real time, but did not due to historical data limitations. If you take your trading seriously, you will want to analyze all trades one by one. This tool is essential to study your results.")
+
+// Define two boolean input variables to enable or disable long and short positions
+enableLong = input.bool(defval = true, title = 'Enable Long positions?', group = 'Backtest', tooltip="Allow the script to open long positions.")
+enableShort = input.bool(defval = true, title = 'Enable Short positions?', group = 'Backtest', tooltip="Allow the script to open short positions.")
+
+// Calculate the number of milliseconds in the specified number of backtesting days
+days_millis = btDays * 86400000
+
+// Calculate the new end date for the backtesting period based on the specified number of days
+
+newdate=timenow-days_millis
+
+i_length = 20//input.int(defval=20, title='Length', group='LR Settings')
+
+ratio(t1, t2, source) => request.security(t1, timeframe.period, source) / request.security(t2, timeframe.period, source)
+adr = (ratio("USI:ADVN.NY", "USI:DECL.NY", close))
+adrbreak = adr[1]>1.25 and adr <= 1.45
+
+
+
+///SWITCH/////
+
+source = open//input.source(open, group='LR Settings (BUY & SELL)')
+length = input.int(title='Lenght', defval= 10, step = 10, minval=1, group='LR Settings (BUY & SELL)', tooltip="Number of candles used to calculate the Linear Regression. Recommended values are between 10 and 100, but generally optimizing this parameter tends to result in overfit, so its default value is recommended.")
+offset = 0//input.int(0, minval=0, group='LR Settings (BUY & SELL)')
+dev = input.float(title='Deviation: 0/3', defval= 2.0, step = 0.5, group='LR Settings (BUY & SELL)', tooltip="Linear regression deviation to establish the range. Recommended values are between -3 and 3, but generally optimizing this parameter tends to result in overfit, so its default value is recommended.")
+smoothing = 1//input.int(1, minval=1, group='LR Settings (BUY & SELL)')
+mtf_val = input.timeframe('', 'Resolution', group='LR Settings (BUY & SELL)')
+line_thick = 1//input.int(1, 'S&R Thickness', minval=1, maxval=4, group='LR Settings')
+
+
+
+p = 'Lime'//input.string('Lime', 'Up Color', options=['Red', 'Lime', 'Orange', 'Teal', 'Yellow', 'White', 'Black'], group='LR Settings')
+q = 'Red'//input.string('Red', 'Down Color', options=['Red', 'Lime', 'Orange', 'Teal', 'Yellow', 'White', 'Black'], group='LR Settings')
+goto = 0//input.int(0, 'End At Bar Index', group='LR Settings')
+bigTrend_lenght = input.int(title= "Lenght of the trade direction SMA", defval= 200, step = 10, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Longs when green, Shorts when red")
+MAsource = input.source(open, title= "MAs Source", group='MA Settings to determine downtrend (BUY & SELL)')
+emaLength = input.int(title='Fast MA Length', defval=20, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Yellow line: Suggested optimization values, between 10 and 50")
+
+showSTfilter = input.bool(title='Apply Supertrend Filter?', defval=false, group='SuperTrend Settings (BUY)', tooltip="Be aware that the optimization of the super trend parameters often results in overfitting.")
+showTSL = input.bool(title='Enable SL?', defval=true, group='Fine Tunning Settings', tooltip="This option enables the stop loss (red line).")
+enableBE = input.bool(title='Enable half position TP?', defval=true, group='Fine Tunning Settings', tooltip="This option enables closing half position in a first TP.")
+moveStop = input.bool(title='Move SL to Break Even (+0.5%) after the first TP level?', defval=false, group='Fine Tunning Settings', tooltip="This option will move the SL to 0.5% above the entry point after the first TP level is reached.")
+macdfilter = input.bool(title='Add MACD Filter?', defval=false, group='Fine Tunning Settings', tooltip="This option adds MACD as confirmation.")
+zonefilter = input.bool(title='Add Trend Zone Filter?', defval=false, group='Fine Tunning Settings', tooltip="This option adds another trend filter as confirmation.")
+
+string i_maType = input.string("SMA", "Fast MA type", options = ["SMA","EMA", "RMA", "WMA","HMA", "CHANGE","CMO","COG","DEV","HIGHEST","LOWEST","MEDIAN","MOM","RANGE","STDEV","VARIANCE"], group='MA Settings to determine downtrend (BUY & SELL)')
+
+float ma = switch i_maType
+	"SMA" => ta.sma(MAsource, emaLength)
+	"EMA" => ta.ema(MAsource, emaLength)
+	"RMA" => ta.rma(MAsource, emaLength)
+	"HMA" => ta.hma(MAsource, emaLength)
+	"CHANGE" => ta.change(MAsource, emaLength)
+	"CMO" => ta.cmo(MAsource, emaLength)
+	"COG" => ta.cog(MAsource, emaLength)
+	"DEV" => ta.dev(MAsource, emaLength)
+	"HIGHEST" => ta.highest(MAsource, emaLength)
+	"LOWEST" => ta.lowest(MAsource, emaLength)
+	"MEDIAN" => ta.median(MAsource, emaLength)
+	"MOM" => ta.mom(MAsource, emaLength)
+    "RANGE" => ta.range(MAsource, emaLength)
+    "STDEV" => ta.stdev(MAsource, emaLength)
+    "VARIANCE" => ta.variance(MAsource, emaLength)
+	// Default used when the three first cases do not match.
+	=> ta.wma(MAsource, emaLength)
+
+emaLength2 = input.int(title='Slow MA Length', defval=100, step=10, group='MA Settings to determine downtrend (BUY & SELL)', tooltip="Blue line: Suggested optimization values, between 50 and 400")
+string i_maType2 = input.string("SMA", "Slow MA type", options = ["SMA","EMA","RMA", "WMA","HMA", "CHANGE", "CMO","COG","DEV","HIGHEST","LOWEST","MEDIAN", "MOM","RANGE","STDEV","VARIANCE"], group='MA Settings to determine downtrend (BUY & SELL)')
+
+float ma2 = switch i_maType2
+	"SMA" => ta.sma(MAsource, emaLength2)
+	"EMA" => ta.ema(MAsource, emaLength2)
+	"RMA" => ta.rma(MAsource, emaLength2)
+	"HMA" => ta.hma(MAsource, emaLength2)
+	"CHANGE" => ta.change(MAsource, emaLength2)
+	"CMO" => ta.cmo(MAsource, emaLength2)
+	"COG" => ta.cog(MAsource, emaLength2)
+	"DEV" => ta.dev(MAsource, emaLength2)
+	"HIGHEST" => ta.highest(MAsource, emaLength2)
+	"LOWEST" => ta.lowest(MAsource, emaLength2)
+	"MEDIAN" => ta.median(MAsource, emaLength2)
+	"MOM" => ta.mom(MAsource, emaLength2)
+	"RANGE" => ta.range(MAsource, emaLength2)
+	"STDEV" => ta.stdev(MAsource, emaLength2)
+	"VARIANCE" => ta.variance(MAsource, emaLength2)
+	// Default used when the three first cases do not match.
+	=> ta.wma(MAsource, emaLength2)
+
+	
+ema200 = ta.sma(open, bigTrend_lenght)
+// Getting inputs
+
+fast_length = input(title="Fast Length", defval=12, group='MACD FILTER SETTINGS (BUY)')
+slow_length = input(title="Slow Length", defval=26, group='MACD FILTER SETTINGS (BUY)')
+src = close//input(title="Source", defval=close, group='MACD FILTER SETTINGS (BUY)')
+signal_length = input.int(title="Signal Smoothing",  minval = 1, maxval = 50, defval = 9, group='MACD FILTER SETTINGS (BUY)')
+sma_source = input.string(title="Oscillator MA Type",  defval="SMA", options=["SMA", "EMA"], group='MACD FILTER SETTINGS (BUY)')
+sma_signal = input.string(title="Signal Line MA Type", defval="SMA", options=["SMA", "EMA"], group='MACD FILTER SETTINGS (BUY)')
+// Plot colors
+col_macd = #2962FF//input(#2962FF, "MACD Line  ", group="Color Settings", inline="MACD")
+col_signal = #FF6D00//input(#FF6D00, "Signal Line  ", group="Color Settings", inline="Signal")
+col_grow_above = #26A69A//input(#26A69A, "Above   Grow", group="Histogram", inline="Above")
+col_fall_above = #B2DFDB//input(#B2DFDB, "Fall", group="Histogram", inline="Above")
+col_grow_below = #FFCDD2//input(#FFCDD2, "Below Grow", group="Histogram", inline="Below")
+col_fall_below = #FF5252//input(#FF5252, "Fall", group="Histogram", inline="Below")
+// Calculating
+fast_ma = sma_source == "SMA" ? ta.sma(src, fast_length) : ta.ema(src, fast_length)
+slow_ma = sma_source == "SMA" ? ta.sma(src, slow_length) : ta.ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal == "SMA" ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+hist = macd - signal
+
+///////////////////////////
+
+showBGcolor = true//input.bool(title='Show BG Color', defval=true, group='Appearance')
+showBGcolorSL = true//input.bool(title='Show SL Active Color', defval=true, group='Appearance')
+
+
+EMAfilter = ma > ma2
+if macdfilter
+    EMAfilter := ma > ma2 and macd > signal and macd-signal > macd[1]-signal[1]
+else
+    EMAfilter := ma > ma2
+ShortEMAfilter = ma < ma2
+if macdfilter
+    ShortEMAfilter := ma < ma2 and macd < signal and macd-signal < macd[1]-signal[1]
+else
+    ShortEMAfilter := ma < ma2
+
+line1 = plot(ma, linewidth=2, title= "Fast MA", color=color.new(color.yellow, 90))
+line2 = plot(ma2, linewidth=2, title= "Slow MA", color=color.new(color.blue, 90))
+fill(line1, line2, color = ma > ma2 ? color.new(color.green,95) : color.new(color.red, 95), title = "MA Trend")
+linecolor = (open > ema200)  ? color.new(color.green, 50) : (open < ema200) ? color.new(color.red, 50) : na	
+line200 = plot(ema200, linewidth=4, title= "SMA 200", color=linecolor)
+price = input.source(close, title= "Price source. Select 'close' for real time calculations", group='Fine Tunning Settings')
+uptrend = price > ma
+downtrend = price < ma
+
+
+cc(x) =>
+    x == 'Red' ? color.red : x == 'Lime' ? color.lime : x == 'Orange' ? color.orange : x == 'Teal' ? color.teal : x == 'Yellow' ? color.yellow : x == 'Black' ? color.black : color.white
+data(x) =>
+    ta.sma(request.security(syminfo.tickerid, mtf_val != '' ? mtf_val : timeframe.period, x), smoothing)
+
+linreg = data(ta.linreg(source, length, offset))
+linreg_p = data(ta.linreg(source, length, offset + 1))
+
+
+x = bar_index
+slope = linreg - linreg_p
+
+intercept = linreg - x * slope
+deviationSum = 0.0
+for i = 0 to length - 1 by 1
+    deviationSum := deviationSum + math.pow(source[i] - (slope * (x - i) + intercept), 2)
+    deviationSum
+deviation = math.sqrt(deviationSum / length)
+x1 = x - length
+x2 = x
+y1 = slope * (x - length) + intercept
+y2 = linreg
+
+updating = goto <= 0 or x < goto
+
+if updating
+    line b = line.new(x1, y1, x2, y2, xloc.bar_index, extend.right, color.aqua, width=line_thick)
+    line.delete(b[1])
+    line dp = line.new(x1, deviation * dev + y1, x2, deviation * dev + y2, xloc.bar_index, extend.right, cc(q), width=line_thick)
+    line.delete(dp[1])
+    line dm = line.new(x1, -deviation * dev + y1, x2, -deviation * dev + y2, xloc.bar_index, extend.right, cc(p), width=line_thick)
+    line.delete(dm[1])
+
+dm_current = -deviation * dev + y2
+dp_current = deviation * dev + y2
+
+//plot (dm_current, "dm_current", color.lime)
+//plot (dp_current, "dp_current", color.fuchsia)
+
+sellup = ta.crossover(price, dp_current)  //and rsiValue > 30
+
+plot(x, 'Bar Index', color.new(color.aqua, 0), line_thick, plot.style_cross, display=display.none)
+
+
+// The Fixed Percent Stop Loss Code
+// User Options to Change Inputs (%)
+takePer = input.float(5.0, title='Long Take Profit %', group='Fine Tunning Settings', tooltip="Green line") / 100
+TraditionalPer = input.float(3.0, title='LongStop Loss %', group='Fine Tunning Settings', tooltip="Red line") / 100
+breakEven = input.float(1.7, title='Long Half position TP %', step= 0.5, group='Fine Tunning Settings', tooltip="White line") / 100
+
+ShorttakePer = input.float(5.0, title='Short Take Profit %', group='Fine Tunning Settings', tooltip="Green line") / 100
+ShortTraditionalPer = input.float(3.0, title='Short Stop Loss %', group='Fine Tunning Settings', tooltip="Red line") / 100
+ShortbreakEven = input.float(1.7, title='Short Half position TP %', step= 0.5, group='Fine Tunning Settings', tooltip="White line") / 100
+// Determine where you've entered and in what direction
+var float TraditionallongStop = strategy.position_avg_price * (1 - TraditionalPer)
+longTake = strategy.position_avg_price * (1 + takePer)
+longBreakeven = strategy.position_avg_price * (1 + breakEven)
+longTrailPerc = 0.03
+longStopPrice = 0.0
+
+var float ShortTraditionallongStop = strategy.position_avg_price * (1 + ShortTraditionalPer)
+ShortTake = strategy.position_avg_price * (1 - ShorttakePer)
+ShortBreakeven = strategy.position_avg_price * (1 - ShortbreakEven)
+//longTrailPerc = 0.03
+ShortStopPrice = 0.0
+longStopPrice := if strategy.position_size > 0
+    stopValue = price * (1 - longTrailPerc)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+    
+ShortStopPrice := if strategy.position_size < 0
+    stopValue = price * (1 - longTrailPerc)
+    math.min(stopValue, ShortStopPrice[1])
+else
+    0
+// Submit exit orders
+start = timestamp(2021, 9, 21, 11, 0)
+end = timestamp(2030, 9, 19, 0, 0)
+
+
+/////////////Trailing Take Profit
+trailpoints = 0.00001 //input.float(title='Trail Points', defval=0.01, minval=0.0, maxval=2.0, step=0.01, group='Fine Tunning Settings (SELL)')
+trailoffset = input.float(title='Trail Offset (0.01 = 1%)', defval=0.005, minval=0.0, maxval=2.0, step=0.005, group='Fine Tunning Settings', tooltip = "Percentage for the trailing stop loss that is triggered once the TP is reached. Expressed in float for ease of calculation (0.01 = 1%).")
+trailloss = 0.01 //input.float(title='Trail loss', defval=0.01, minval=0.0, maxval=2.0, step=0.01, group='Fine Tunning Settings (SELL)')
+
+
+var int nPastDays = 0
+a = ta.barssince(ta.change(strategy.position_size))
+buycondition = a >= 1 or  na(a)
+
+newLoss = (strategy.losstrades > strategy.losstrades[1]) and
+     (strategy.wintrades == strategy.wintrades[1]) and
+     (strategy.eventrades == strategy.eventrades[1])
+
+streakLen = 0
+
+streakLen := if (newLoss)
+    nz(streakLen[1]) + 1
+else
+    if (strategy.wintrades > strategy.wintrades[1]) or
+         (strategy.eventrades > strategy.eventrades[1])
+        0
+    else
+        nz(streakLen[1])
+        
+// See if losing streak is under max allowed
+
+
+risk = input.float(title='% of $ Allocation for Drawdown', defval=100.00, minval=0.0, maxval=100.0, step=0.10, group='Risk Management (Kill Switchs)', tooltip="Kill switch: The script will close the current trade and stop trading once the set percentage of capital has been lost. To use this function it is important to set the current date and time for the start of the backtest to not include past trades in the calculations.")
+strategy.risk.max_drawdown(value=risk, type=strategy.percent_of_equity)
+maxLosingStreak = input.int(title="Max Losing Streak Length", defval=15, minval=1, group='Risk Management (Kill Switchs)', tooltip="Kill switch: The script will close the current trade and stop trading once the set number of consecutive negative trades has been reached. To use this function it is important to set the current date and time for the start of the backtest in order not to include past trades in the calculations.")
+okToTrade = streakLen < maxLosingStreak
+
+//////////////////////////////SUPERTREND
+Periods = input.int(title="ATR Period", defval=10, group='SuperTrend Settings (BUY)')
+src2 = input(hl2, title="Source", group='SuperTrend Settings (BUY)')
+Multiplier = input.float(title="ATR Multiplier", step=0.1, defval=3.0, group='SuperTrend Settings (BUY)')
+changeATR= false//input.bool(title="Change ATR Calculation Method ?", defval=false, group='SuperTrend Settings (BUY)')
+
+atr2 = ta.sma(ta.tr, Periods)
+atr= changeATR ? ta.atr(Periods) : atr2
+up=src2-(Multiplier*atr)
+up1 = nz(up[1],up)
+up := close[1] > up1 ? math.max(up,up1) : up
+dn=src2+(Multiplier*atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and price > dn1 ? 1 : trend == 1 and price < up1 ? -1 : trend
+
+upPlot = plot(showSTfilter and trend == 1 ? up : na, title="ST Up Trend", style=plot.style_linebr, linewidth=1, color=color.aqua)
+buySignal = trend == 1 and trend[1] == -1
+
+dnPlot = plot(showSTfilter and trend != 1 ? dn : na, title="ST Down Trend", style=plot.style_linebr, linewidth=1, color=color.maroon)
+sellSignal = trend == -1 and trend[1] == 1
+
+isup = trend == 1 ? up : na
+isdn = trend != 1 ? dn : na
+//////////////////////////////
+mapositive = ma-ma2 > ma[1]-ma2[1]
+manegative = ma-ma2 < ma[1]-ma2[1]
+
+buy = (ta.crossunder(source, dm_current) and mapositive) and buycondition
+buyshort = (ta.crossover(source, dp_current) and manegative) and buycondition
+
+if showSTfilter == true
+    buy := (ta.crossunder(source, dm_current) and isup and mapositive) and buycondition
+    buyshort := (ta.crossover(source, dp_current) and isdn and manegative) and buycondition
+else
+    buy := (ta.crossunder(source, dm_current) and mapositive) and buycondition
+    buyshort := (ta.crossover(source, dp_current) and manegative) and buycondition
+
+//plot(linreg, "Regression Line", cc(linreg>linreg[1]?p:q), editable=false)
+
+enterLong = input(title = 'Enter Long position size', defval=100.0, group='Fine Tunning Settings', tooltip="Enter here the size of the position to buy.")
+exitLong = enterLong/2//input(title= 'Exit Long Command', defval="50", group='Optional bot Command Settings {{strategy.order.comment}}', tooltip="Enter here the command provided by your preferred bot platform to exit long.")
+enterShort = input(title = 'Enter Short position size', defval=100.0, group='Fine Tunning Settings', tooltip="Enter here the size of the position to sell.")
+exitShort = enterLong/2//input(title= 'Exit Long Command', defval="50", group='Optional bot Command Settings {{strategy.order.comment}}', tooltip="Enter here the command provided by your preferred bot platform to exit long.")
+
+enterLongmsg = input(title = 'Enter Long command', defval="", group='Optional bot Command Settings {{strategy.order.alert_message}}', tooltip="Enter here the command provided by your preferred bot platform to enter long. Ypu can call it with {{strategy.order.alert_message}}")
+exitLongmsg = input(title= 'Exit Long Command', defval="", group='Optional bot Command Settings {{strategy.order.alert_message}}', tooltip="Enter here the command provided by your preferred bot platform to exit long. Ypu can call it with {{strategy.order.alert_message}}")
+enterShortmsg = input(title = 'Enter Short command', defval="", group='Optional bot Command Settings {{strategy.order.alert_message}}', tooltip="Enter here the command provided by your preferred bot platform to enter short. Ypu can call it with {{strategy.order.alert_message}}")
+exitShortmsg = input(title= 'Exit Short Command', defval="", group='Optional bot Command Settings {{strategy.order.alert_message}}', tooltip="Enter here the command provided by your preferred bot platform to exit short. Ypu can call it with {{strategy.order.alert_message}}")
+
+
+plotshape(buy, title='LR Long buy condition', location=location.belowbar, color=color.new(color.yellow, 0), style=shape.triangleup)
+plotshape(buyshort, title='LR Short buy condition', location=location.abovebar, color=color.new(color.orange, 0), style=shape.triangledown)
+
+//plotshape(macdfilter ? ta.crossover(macd,signal) : na, title='macd+', location=location.belowbar,  size= size.large, color=color.new(color.blue, 0), style=shape.arrowup)
+//plotshape(macdfilter ? ta.crossunder(macd,signal) : na, title='macd-', location=location.abovebar, size= size.large, color=color.new(color.orange, 0), style=shape.arrowdown)
+///////////////TREND LINES
+
+startyear = 2020//input(defval=2020, title='Start Year')
+startmonth = 1//input(defval=1, title='Start Month')
+startday = 1//input(defval=1, title='Start day')
+prd = input.int(defval=10, title='Pivot Period', minval=10, maxval=50, group = "Trend Lines")
+PPnum = input.int(defval=4, title='Number of Pivot Points to check', minval=2, maxval=6, group = "Trend Lines")
+utcol = color.lime//input.color(defval=color.lime, title='Colors', inline='tcol')
+dtcol = color.red//input.color(defval=color.red, title='', inline='tcol')
+
+float ph = ta.pivothigh(prd, prd)
+float pl = ta.pivotlow(prd, prd)
+
+var tval = array.new_float(PPnum)
+var tpos = array.new_int(PPnum)
+var bval = array.new_float(PPnum)
+var bpos = array.new_int(PPnum)
+
+add_to_array(apointer1, apointer2, val) =>
+    array.unshift(apointer1, val)
+    array.unshift(apointer2, bar_index)
+    array.pop(apointer1)
+    array.pop(apointer2)
+
+if ph
+    add_to_array(tval, tpos, ph)
+
+if pl
+    add_to_array(bval, bpos, pl)
+
+// line definitions
+maxline = 3
+var bln = array.new_line(maxline, na)
+var tln = array.new_line(maxline, na)
+
+// loop for pivot points to check if there is possible trend line
+countlinelo = 0
+countlinehi = 0
+
+//starttime = timestamp(startyear, startmonth, startday, 0, 0, 0)
+
+downTrend = false
+upTrend = false
+if time >= i_startTime
+    for x = 0 to maxline - 1 by 1
+        line.delete(array.get(bln, x))
+        line.delete(array.get(tln, x))
+    for p1 = 0 to PPnum - 2 by 1
+        uv1 = 0.0
+        uv2 = 0.0
+        up1 := 0
+        up2 = 0
+        if countlinelo <= maxline
+            for p2 = PPnum - 1 to p1 + 1 by 1
+                val1 = array.get(bval, p1)
+                val2 = array.get(bval, p2)
+                pos1 = array.get(bpos, p1)
+                pos2 = array.get(bpos, p2)
+                if val1 > val2
+                    diff = (val1 - val2) / (pos1 - pos2)
+                    hline = val2 + diff
+                    lloc = bar_index
+                    lval = low
+                    valid = true
+                    for x = pos2 + 1 - prd to bar_index by 1
+                        if close[bar_index - x] < hline
+                            valid := false
+                            break
+                        lloc := x
+                        lval := hline
+                        hline += diff
+                        hline
+
+
+                    if valid
+                        uv1 := hline - diff
+                        uv2 := val2
+                        up1 := lloc
+                        up2 := pos2
+                        break
+
+        dv1 = 0.0
+        dv2 = 0.0
+        dp1 = 0
+        dp2 = 0
+        if countlinehi <= maxline
+            for p2 = PPnum - 1 to p1 + 1 by 1
+                val1 = array.get(tval, p1)
+                val2 = array.get(tval, p2)
+                pos1 = array.get(tpos, p1)
+                pos2 = array.get(tpos, p2)
+                if val1 < val2
+                    diff = (val2 - val1) / float(pos1 - pos2)
+                    hline = val2 - diff
+                    lloc = bar_index
+                    lval = high
+                    valid = true
+                    for x = pos2 + 1 - prd to bar_index by 1
+                        if close[bar_index - x] > hline
+                            valid := false
+                            break
+                        lloc := x
+                        lval := hline
+                        hline -= diff
+                        hline
+
+                    if valid
+                        dv1 := hline + diff
+                        dv2 := val2
+                        dp1 := lloc
+                        dp2 := pos2
+                        break
+
+        // if there is continues uptrend line then draw it
+        if up1 != 0 and up2 != 0 and countlinelo < maxline
+            countlinelo += 1
+            //array.set(bln, countlinelo - 1, line.new(up2 - prd, uv2, up1, uv1, color=utcol, width = 4))
+            upTrend := true
+        // if there is continues downtrend line then draw it
+        if dp1 != 0 and dp2 != 0 and countlinehi < maxline
+            countlinehi += 1
+            //array.set(tln, countlinehi - 1, line.new(dp2 - prd, dv2, dp1, dv1, color=dtcol, width = 4))
+            downTrend := true
+
+/////////////////EXPIRATIO
+expired = ta.barssince(strategy.position_size != 0) > 80
+/////////////LABELS
+
+var size = "full"
+
+
+if strategy.position_size == 0
+    TraditionallongStop := close * (1 - TraditionalPer)
+    ShortTraditionallongStop := close * (1 + ShortTraditionalPer)
+    size := "full"
+
+var timeperiod = i_startTime
+var scorecolorexit = 0
+var scorecolorentry = 0
+if lastdays
+    timeperiod := newdate
+else
+    timeperiod := i_startTime
+if time >= timeperiod and time <= i_endTime and okToTrade
+    if zonefilter
+        if buy and EMAfilter and strategy.position_size == 0 and downTrend == false and upTrend == true and enableLong and price > ema200 and slope > 0
+            strategy.entry(id='BUY L', direction=strategy.long, comment=str.tostring(enterLong), alert_message=enterLongmsg)
+            scorecolorentry := 1
+            size:= "full"
+            //label.new(bar_index, high, "slope: "+str.tostring(slope), color=color.blue)
+        if buyshort and ShortEMAfilter and strategy.position_size == 0 and upTrend == false and downTrend == true and enableShort and price < ema200 and slope < 0
+            strategy.entry(id='BUY S', direction=strategy.short, comment=str.tostring(enterShort), alert_message=enterShortmsg)
+            scorecolorentry := 1
+            size:= "full"
+            //label.new(bar_index, high, "slope: "+str.tostring(slope), color=color.blue)
+    else
+        if buy and EMAfilter and strategy.position_size == 0  and enableLong and price > ema200 and slope > 0//and downTrend == false and upTrend == true
+            strategy.entry(id='BUY L', direction=strategy.long, comment=str.tostring(enterLong), alert_message=enterLongmsg)
+            scorecolorentry := 1
+            size:= "full"
+            //label.new(bar_index, high, "slope: "+str.tostring(slope), color=color.blue)
+        if buyshort and ShortEMAfilter and strategy.position_size == 0  and enableShort and price < ema200 and slope < 0//and downTrend == false and upTrend == true
+            strategy.entry(id='BUY S', direction=strategy.short, comment=str.tostring(enterShort), alert_message=enterShortmsg)
+            scorecolorentry := 1
+            size:= "full"
+            //label.new(bar_index, high, "slope: "+str.tostring(slope), color=color.blue)
+    
+
+if strategy.position_size > 0 and price >= longTake// or expired
+    if size== "half"
+        strategy.exit(id='SELL', trail_price=longTake, trail_points=trailpoints * price / syminfo.mintick, trail_offset=trailoffset * price / syminfo.mintick, loss=trailloss * price / syminfo.mintick,qty_percent=100, comment=str.tostring(exitLong), alert_message=exitLongmsg)  //, stop=longStop)
+        
+    else
+        strategy.exit(id='SELL', trail_price=longTake, trail_points=trailpoints * price / syminfo.mintick, trail_offset=trailoffset * price / syminfo.mintick, loss=trailloss * price / syminfo.mintick,qty_percent=100, comment=str.tostring(enterLong), alert_message=exitLongmsg)  //, stop=longStop)
+    size:= "full"
+    scorecolorexit := 0
+    a := 0
+    
+if strategy.position_size < 0 and price <= ShortTake// or expired
+    if size== "half"
+        strategy.exit(id='SELL', trail_price=ShortTake, trail_points=trailpoints * price / syminfo.mintick, trail_offset=trailoffset * price / syminfo.mintick, loss=trailloss * price / syminfo.mintick,qty_percent=100, comment=str.tostring(exitShort), alert_message=exitShortmsg)  //, stop=longStop)
+        
+    else
+        strategy.exit(id='SELL', trail_price=ShortTake, trail_points=trailpoints * price / syminfo.mintick, trail_offset=trailoffset * price / syminfo.mintick, loss=trailloss * price / syminfo.mintick,qty_percent=100, comment=str.tostring(enterShort), alert_message=exitShortmsg)  //, stop=longStop)
+    size:= "full"
+    scorecolorexit := 0
+    a := 0
+
+if strategy.position_size > 0 and price >= longBreakeven and enableBE
+    strategy.exit(id='BE', limit=longBreakeven, stop=0,qty_percent=50, comment=str.tostring(exitLong), alert_message=exitLongmsg)
+    scorecolorexit := 0
+    a := 0
+    if moveStop
+        TraditionallongStop := strategy.position_avg_price * 1.005
+    size:= "half"
+    
+    
+if strategy.position_size < 0 and price <= ShortBreakeven and enableBE
+    strategy.exit(id='BE', limit=ShortBreakeven, stop=0,qty_percent=50, comment=str.tostring(exitShort), alert_message=exitShortmsg)
+    scorecolorexit := 0
+    a := 0
+    if moveStop
+        ShortTraditionallongStop := strategy.position_avg_price - (strategy.position_avg_price * 0.005)
+    size:= "half"
+    
+if strategy.position_size > 0 and price >= longBreakeven and not enableBE
+    
+    if moveStop
+        TraditionallongStop := strategy.position_avg_price * 1.005
+    
+    
+    
+if strategy.position_size < 0 and price <= ShortBreakeven and not enableBE
+    
+    if moveStop
+        ShortTraditionallongStop := strategy.position_avg_price - (strategy.position_avg_price * 0.005)
+    
+
+    
+if strategy.position_size > 0 and showTSL// or expired       
+    if size== "half"
+        strategy.close_all(when = price < TraditionallongStop, comment=str.tostring(exitLong), alert_message=exitLongmsg)
+        a := 0
+        scorecolorexit := 0
+        size:= "full"
+    else
+        strategy.close_all(when = price < TraditionallongStop, comment=str.tostring(enterLong), alert_message=exitLongmsg)
+        a := 0
+        scorecolorexit := 0
+        size:= "full"
+if strategy.position_size < 0 and showTSL// or expired       
+    if size== "half"
+        strategy.close_all(when = price > ShortTraditionallongStop, comment=str.tostring(exitShort), alert_message=exitShortmsg)
+        a := 0
+        scorecolorexit := 0
+        size:= "full"
+    else
+        strategy.close_all(when = price > ShortTraditionallongStop, comment=str.tostring(enterShort), alert_message=exitShortmsg)
+        a := 0
+        scorecolorexit := 0
+        size:= "full"
+       
+if strategy.position_size == 0
+    nPastDays := 0
+    nPastDays
+    size:= "full"
+
+
+  
+Disable_TSL = TraditionallongStop == 100 and ShortTraditionallongStop == 100
+
+
+p3 = plot(strategy.position_size > 0 ? longBreakeven : na, style=plot.style_linebr, color=color.new(color.white, 0), linewidth=1, title='First Long Take Profit')
+p1 = plot(strategy.position_size > 0 ? longTake : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='Long Final Take Profit')
+p2 = plot(strategy.position_size > 0  and showTSL ? TraditionallongStop : na, style=plot.style_linebr, color=color.new(color.red, 0), linewidth=1, title='Long Stop Loss')
+p4 = plot(strategy.position_size > 0 ? strategy.position_avg_price : na, style=plot.style_linebr, color=color.new(color.white, 100), linewidth=1, title='Long Avg Price', editable = false)
+
+s3 = plot(strategy.position_size < 0 ? ShortBreakeven : na, style=plot.style_linebr, color=color.new(color.white, 0), linewidth=1, title='First Short Take Profit')
+s1 = plot(strategy.position_size < 0 ? ShortTake : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='Final Short Take Profit')
+s2 = plot(strategy.position_size < 0  and showTSL ? ShortTraditionallongStop : na, style=plot.style_linebr, color=color.new(color.red, 0), linewidth=1, title='Short Stop Loss')
+s4 = plot(strategy.position_size < 0 ? strategy.position_avg_price : na, style=plot.style_linebr, color=color.new(color.white, 100), linewidth=1, title='Short Avg Price', editable = false)
+
+plotclose = plot(close, style=plot.style_linebr, color=color.new(color.white, 100), linewidth=1, title='Close', editable = false)
+// Colour background
+
+//bgcolor(strategy.position_size > 0 and showBGcolor ? color.white : na, transp=97)
+red = color.new (color.red, 90)
+green = color.new (color.green,90)
+fill(p3, p4, color=color.new(color.white, 95), title = "First Long profit zone")	
+fill(p1, p4, color=color.new(color.green, 80), title = "Final Long profit  zone")	
+fill(p4, p2, color=color.new(color.red, 80), title = "Long Loss zone")	
+fill(s3, s4, color=color.new(color.white, 95), title = "First Short profit zone")	
+fill(s1, s4, color=color.new(color.green, 80), title = "Final Short profit  zone")
+fill(s4, s2, color=color.new(color.red, 80), title = "Short Loss zone")
+//fill(line2, plotclose, (downTrend and zonefilter) ? red : green)
+bgcolor((downTrend and zonefilter) ? color.new(color.maroon,90) : na, title = "Downtrend zone")
+bgcolor((upTrend and zonefilter) ? color.new(color.lime,95) : na, title = "Uptrend zone")
+////DEBUG
+badSL2 = close < longTake and high >= longTake and strategy.position_size > 0
+badSL1 = close < longBreakeven and high >= longBreakeven and strategy.position_size > 0 and size == "full" and high < longTake
+badTP= close > TraditionallongStop and low <= TraditionallongStop and strategy.position_size > 0 and high < longBreakeven// and size== "full"
+plotshape(debugmode ? badSL2 : na, title='BAD Long SL', location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup)
+plotshape(debugmode ? badSL1: na, title='BAD Long SL2', location=location.belowbar, color=color.new(color.teal, 0), style=shape.labelup)
+plotshape(debugmode ? badTP: na, title='BAD Long TP', location=location.belowbar, color=color.new(color.red, 0), style=shape.labelup)
+
+ShortbadSL2 = close > ShortTake and low <= ShortTake and strategy.position_size < 0
+ShortbadSL1 = close > ShortBreakeven and low <= ShortBreakeven and strategy.position_size < 0 and size == "half" and low > ShortTake
+ShortbadTP= close < ShortTraditionallongStop and high >= ShortTraditionallongStop and strategy.position_size < 0 and low > ShortBreakeven// and size== "full"
+plotshape(debugmode ? ShortbadSL2 : na, title='BAD Short SL', location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup)
+plotshape(debugmode ? ShortbadSL1: na, title='BAD Short SL2', location=location.belowbar, color=color.new(color.teal, 0), style=shape.labelup)
+plotshape(debugmode ? ShortbadTP: na, title='BAD Short TP', location=location.belowbar, color=color.new(color.red, 0), style=shape.labelup)
+
+
+
+
+
+///TABLE
+
+var pnlTable = table.new(position = position.top_right, columns = 4, rows = 4, border_color = color.white, border_width = 1)
+table.cell(table_id = pnlTable, column = 0, row = 0, bgcolor = color.gray, text_color = color.white, text = "Opening price")
+table.cell(table_id = pnlTable, column = 1, row = 0, bgcolor = color.green, text_color = color.white, text = "1º Target")
+table.cell(table_id = pnlTable, column = 2, row = 0, bgcolor = color.green, text_color = color.white, text = "2º Target + " + str.tostring(trailoffset*100)+ "% Trail")
+table.cell(table_id = pnlTable, column = 3, row = 0, bgcolor = color.red,  text_color = color.white, text = "SL")
+if strategy.position_size > 0
+    table.cell(table_id = pnlTable, column = 0, row = 0, bgcolor = color.green, text_color = color.white, text = "Opening price (Long)")
+    table.cell(table_id = pnlTable, column = 0, row = 1, bgcolor = color.gray, text_color = color.white, text = str.tostring(strategy.position_avg_price))
+    table.cell(table_id = pnlTable, column = 1, row = 1, bgcolor = color.green, text_color = color.yellow, text = (str.tostring(longBreakeven)+ '('+str.tostring(breakEven*100)+'%)'))
+    table.cell(table_id = pnlTable, column = 2, row = 1, bgcolor = color.green, text_color = color.white,text = (str.tostring(longTake)+ '('+str.tostring(takePer*100)+'%)'))
+    table.cell(table_id = pnlTable, column = 3, row = 1, bgcolor = color.red, text_color = color.yellow, text = (str.tostring(TraditionallongStop)+ '('+str.tostring(TraditionalPer*100)+'%)'))
+if strategy.position_size < 0
+    table.cell(table_id = pnlTable, column = 0, row = 0, bgcolor = color.green, text_color = color.white, text = "Opening price (Short)")
+    table.cell(table_id = pnlTable, column = 0, row = 1, bgcolor = color.gray, text_color = color.white, text = str.tostring(strategy.position_avg_price))
+    table.cell(table_id = pnlTable, column = 1, row = 1, bgcolor = color.green, text_color = color.yellow, text = (str.tostring(ShortBreakeven)+ '('+str.tostring(ShortbreakEven*100)+'%)'))
+    table.cell(table_id = pnlTable, column = 2, row = 1, bgcolor = color.green, text_color = color.white,text = (str.tostring(ShortTake)+ '('+str.tostring(ShorttakePer*100)+'%)'))
+    table.cell(table_id = pnlTable, column = 3, row = 1, bgcolor = color.red, text_color = color.yellow, text = (str.tostring(ShortTraditionallongStop)+ '('+str.tostring(ShortTraditionalPer*100)+'%)'))
+
+if strategy.position_size == 0
+    table.cell(table_id = pnlTable, column = 0, row = 0, bgcolor = color.gray, text_color = color.white, text = "Opening price")
+    table.cell(table_id = pnlTable, column = 0, row = 1, bgcolor = color.gray, text_color = color.white, text = 'Waiting for a trade')
+    table.cell(table_id = pnlTable, column = 1, row = 1, bgcolor = color.green, text_color = color.yellow, text =  'Waiting for a trade')
+    table.cell(table_id = pnlTable, column = 2, row = 1, bgcolor = color.green, text_color = color.white,text =  'Waiting for a trade')
+    table.cell(table_id = pnlTable, column = 3, row = 1, bgcolor = color.red, text_color = color.yellow, text =  'Waiting for a trade')
+
+table.cell(table_id = pnlTable, column = 0, row = 2, bgcolor = color.blue, text_color = color.white, text =  'Fedra Algotrading Scripts')
+table.merge_cells(pnlTable, 0, 2, 3, 2)
